@@ -4,11 +4,17 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
 const parseDiff = require('parse-diff');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const User = require('./models/User');
 const PR_Snapshot = require('./models/PR_Snapshot');
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*' }
+});
 const PORT = process.env.PORT || 5000;
 
 // Middleware
@@ -87,12 +93,12 @@ app.post('/api/prs/:id/claim', async (req, res) => {
     }
 
     // Atomic findOneAndUpdate to prevent race conditions
-    // Filter MUST be { _id: prId, claimedBy: null }
+    // Filter MUST be { _id: prId, leadReviewer: null }
     const updatedPr = await PR_Snapshot.findOneAndUpdate(
-      { _id: prId, claimedBy: null },
+      { _id: prId, leadReviewer: null },
       { 
         $set: { 
-          claimedBy: userId, 
+          leadReviewer: userId, 
           status: 'reviewing' 
         } 
       },
@@ -112,7 +118,66 @@ app.post('/api/prs/:id/claim', async (req, res) => {
   }
 });
 
+// WebSockets Logic
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.id}`);
+
+  // 1. Join PR Room
+  socket.on('join_pr_room', ({ prId }) => {
+    socket.join(prId);
+    console.log(`Socket ${socket.id} joined room: ${prId}`);
+  });
+
+  // 2. The "Hand-off" Mechanism (Granting Access)
+  socket.on('grant_edit_access', async ({ prId, targetUserId, requestingUserId }) => {
+    try {
+      const pr = await PR_Snapshot.findById(prId);
+      if (!pr) return;
+
+      // Verify the requesting user is the actual leadReviewer
+      if (pr.leadReviewer && pr.leadReviewer.toString() === requestingUserId) {
+        // Grant access
+        if (!pr.allowedEditors.includes(targetUserId)) {
+          pr.allowedEditors.push(targetUserId);
+          await pr.save();
+        }
+        
+        // Broadcast to everyone in the room that access was updated
+        io.to(prId).emit('access_updated', { targetUserId, prId });
+      }
+    } catch (err) {
+      console.error('Error granting edit access:', err.message);
+    }
+  });
+
+  // 3. Live Commenting
+  socket.on('new_comment', async ({ prId, file, line, text, author }) => {
+    try {
+      const newComment = {
+        lineNumber: line,
+        text,
+        authorId: author // Assuming author is the userId string
+      };
+
+      // Save comment to DB
+      await PR_Snapshot.updateOne(
+        { _id: prId },
+        { $push: { comments: newComment } }
+      );
+
+      // Broadcast to room instantly
+      io.to(prId).emit('new_comment', { prId, file, line, text, author });
+    } catch (err) {
+      console.error('Error adding comment:', err.message);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id}`);
+  });
+});
+
 // Start Server
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });

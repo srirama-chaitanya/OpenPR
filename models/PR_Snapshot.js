@@ -23,11 +23,15 @@ const prSnapshotSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  claimedBy: {
+  leadReviewer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null
   },
+  allowedEditors: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }],
   status: {
     type: String,
     enum: ['open', 'reviewing', 'completed'],
